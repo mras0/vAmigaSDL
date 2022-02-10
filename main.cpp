@@ -275,12 +275,13 @@ public:
         amiga_.revertToFactorySettings();
         //amiga_.configure(CONFIG_A500_ECS_1MB);
         amiga_.configure(CONFIG_A500_OCS_1MB);
-        //amiga_.configure(OPT_CHIP_RAM, 1024);
-        //amiga_.configure(OPT_SLOW_RAM, /*512*/0);
+        //amiga_.configure(OPT_AGNUS_REVISION, /*AGNUS_ECS_1MB*/AGNUS_OCS_DIP);
+        //amiga_.configure(OPT_CHIP_RAM, 512);
+        //amiga_.configure(OPT_SLOW_RAM, 512);
         //amiga_.configure(OPT_FAST_RAM, 0);
         amiga_.configure(OPT_BLITTER_ACCURACY, 2);
 
-        //amiga_.configure(OPT_RAM_INIT_PATTERN, RAM_INIT_RANDOMIZED);
+        amiga_.configure(OPT_RAM_INIT_PATTERN, RAM_INIT_RANDOMIZED);
 
         amiga_.paula.muxer.setSampleRate(audio_sample_rate);
 
@@ -390,7 +391,7 @@ public:
                     }
                     break;
                 case SDL_MOUSEMOTION:
-                    if (mouse_captured_) {
+                    if (mouse_captured_ && (e.motion.xrel || e.motion.yrel)) {
 #ifdef WSL2_MOUSE_HACK
                         // Probably only for WSL2: xrel/yrel are actually *not* relative (and x/y don't update)??
                         amiga_.controlPort1.mouse.setDxDy(e.motion.xrel - last_mouse_x_, e.motion.yrel - last_mouse_y_);
@@ -412,9 +413,11 @@ public:
 
             bool update = overlay_active_ && overlay_dirty_;
             if (power_is_on_) {
+                amiga_.denise.pixelEngine.lockStableBuffer();
                 const auto buffer = amiga_.denise.pixelEngine.getStableBuffer();
                 if (buffer.data != last_buffer_pointer_) { // HACK: Don't update if not a new frame
                     std::memcpy(&current_frame_[0], buffer.data, HPIXELS * VPIXELS * sizeof(uint32_t));
+                    amiga_.denise.pixelEngine.unlockStableBuffer();
 
                     void* pixels;
                     int pitch;
@@ -442,6 +445,8 @@ public:
                     last_frame_type_ = buffer.longFrame;
                     last_buffer_pointer_ = buffer.data;
                     update = true;
+                } else {
+                    amiga_.denise.pixelEngine.unlockStableBuffer();
                 }
             } else {
                 void* pixels;
@@ -469,12 +474,9 @@ public:
                 if (overlay_active_)
                     SDL_RenderCopy(renderer_.get(), overlay_.get(), nullptr, nullptr);
                 SDL_RenderPresent(renderer_.get());
-            } else if (overlay_active_) {
-                SDL_Delay(50);
-                overlay_dirty_ = true;
-            } else {
-                SDL_Delay(power_is_on_ ? 5 : 20);
             }
+            
+            SDL_Delay(5);
         }
     }
 
@@ -499,6 +501,7 @@ private:
     bool overlay_dirty_ = true;
     bool overlay_blink_ = false;
     bool power_is_on_ = false;
+    uint64_t last_overlay_blink_ = 0;
 
     void capture_mouse(bool enabled)
     {
@@ -532,6 +535,9 @@ private:
                 std::memset(&current_frame_[0], 0, sizeof(uint32_t)*current_frame_.size());
                 std::memset(&last_frame_[0], 0, sizeof(uint32_t)*last_frame_.size());
                 break;
+            case MSG_UPDATE_CONSOLE:
+                overlay_dirty_ = true;
+                return;
             case MSG_USER_SNAPSHOT_TAKEN:
             {
                 std::unique_ptr<Snapshot> snapshot{amiga_.latestUserSnapshot()};
@@ -612,8 +618,18 @@ private:
 
     void update_overlay()
     {
-        if (!overlay_dirty_)
-            return;
+        if (!overlay_dirty_) {
+            const auto now = SDL_GetTicks();
+            if (now - last_overlay_blink_ < 100)
+                return;
+            last_overlay_blink_ = now;
+        }
+
+        // Hmm...
+        std::vector<std::string> lines;
+        std::istringstream iss { amiga_.retroShell.text() };
+        for (std::string line; std::getline(iss, line);)
+            lines.push_back(line);
 
         void* pixels;
         int pitch;
@@ -629,16 +645,16 @@ private:
 
         int y = char_height;
         const int max_lines = screen_height/char_height - 2;
-        const auto& lines = amiga_.retroShell.getStorage();
         for (size_t linecnt = lines.size() > max_lines ? lines.size() - max_lines : 0; linecnt < lines.size(); ++linecnt) {
             const auto& l = lines[linecnt];
             draw_string(pixels, pitch, char_width, y, l.c_str(), alpha | 0xffffff);
             y += char_height;
         }
+
         if (!overlay_blink_ && !lines.empty()) {
-            auto cpos = amiga_.retroShell.cposAbs();
-            if ((cpos + 2) * char_width < screen_width)
-                draw_cursor(pixels, pitch, (cpos + 1) * char_width, y - char_height, 0xffffffff);
+            const auto cpos = static_cast<int>(amiga_.retroShell.cursorRel() + lines.back().length());
+            if ((cpos + 1) * char_width < screen_width)
+                draw_cursor(pixels, pitch, cpos * char_width, y - char_height, 0xffffffff);
         }
 
         SDL_UnlockTexture(overlay_.get());
@@ -652,10 +668,7 @@ private:
             // Paste
             std::unique_ptr<char, sdl_freer> text{SDL_GetClipboardText()};
             if (text) {
-                for (const char* cp = text.get(); *cp; ++cp) {
-                    amiga_.retroShell.pressKey(*cp);
-                }
-                overlay_dirty_ = true;
+                amiga_.retroShell.press(text.get());
             }
         }
     }
@@ -671,51 +684,50 @@ private:
             last_buffer_pointer_ = nullptr; // Force update (dirty)
             break;
         case SDLK_UP:
-            rs.pressUp();
+            rs.press(RSKEY_UP);
             break;
         case SDLK_DOWN:
-            rs.pressDown();
+            rs.press(RSKEY_DOWN);
             break;
         case SDLK_LEFT:
-            rs.pressLeft();
+            rs.press(RSKEY_LEFT);
             break;
         case SDLK_RIGHT:
-            rs.pressRight();
+            rs.press(RSKEY_RIGHT);
             break;
         case SDLK_HOME:
-            rs.pressHome();
+            rs.press(RSKEY_HOME);
             break;
         case SDLK_END:
-            rs.pressEnd();
+            rs.press(RSKEY_END);
             break;
         case SDLK_TAB:
-            rs.pressTab();
+            rs.press(RSKEY_TAB);
             break;
         case SDLK_BACKSPACE:
-            rs.pressBackspace();
+            rs.press(RSKEY_BACKSPACE);
             break;
         case SDLK_DELETE:
-            rs.pressDelete();
+            rs.press(RSKEY_DEL);
             break;
         case SDLK_RETURN:
-            rs.pressReturn();
+            rs.press(RSKEY_RETURN);
             break;
         default:
             if (k.sym >= SDLK_a && k.sym <= SDLK_z) {
                 const char ch = static_cast<char>((k.sym-SDLK_a) + (k.mod & KMOD_SHIFT ? 'A' : 'a'));
-                rs.pressKey(ch);
+                rs.press(ch);
                 break;
             } else if (k.sym >= ' ' && k.sym <= 0x7e) {
                 if (k.mod & KMOD_SHIFT)
-                    rs.pressKey(with_shift(static_cast<char>(k.sym)));
+                    rs.press(with_shift(static_cast<char>(k.sym)));
                 else
-                    rs.pressKey(static_cast<char>(k.sym));
+                    rs.press(static_cast<char>(k.sym));
                 break;
             }
             std::cout << "Unhandled key: " << k.sym << " " << SDL_GetKeyName(k.sym) << "\n";
             return;
         }
-        overlay_dirty_ = true;
     }
 };
 
