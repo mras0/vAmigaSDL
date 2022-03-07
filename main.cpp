@@ -22,7 +22,7 @@
 // Visible area
 constexpr int xstart = (HBLANK_MAX + 1) * 4;
 constexpr int xend   = HPIXELS;
-constexpr int ystart = 0x20;
+constexpr int ystart = 0x1B;
 constexpr int yend   = 0x137;
 static_assert(xend - xstart <= HPIXELS);
 static_assert(yend - ystart <= VPIXELS);
@@ -53,22 +53,22 @@ private:
     const uint32_t flags_;
 };
 
-std::unique_ptr<Disk> load_disk(const std::string& filename)
+std::unique_ptr<FloppyDisk> load_disk(const std::string& filename)
 {
     if (DMSFile::isCompatible(filename)) {
         DMSFile dms{filename};
         std::cout << filename << ": DMS\n";
-        return std::make_unique<Disk>(dms);
+        return std::make_unique<FloppyDisk>(dms);
     }
     if (ADFFile::isCompatible(filename)) {
         ADFFile adf{filename};
         std::cout << filename << ": ADF\n";
-        return std::make_unique<Disk>(adf);
+        return std::make_unique<FloppyDisk>(adf);
     }
     if (EXEFile::isCompatible(filename)) {
         EXEFile exe{filename};
         std::cout << filename << ": EXE\n";
-        return std::make_unique<Disk>(exe);
+        return std::make_unique<FloppyDisk>(exe);
     }
     throw std::runtime_error{"Unknown file type: " + filename};
 }
@@ -257,7 +257,7 @@ public:
         }
 
 
-        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, long data) {
+        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, i64 data) {
             reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(type, data);
         });
     }
@@ -273,20 +273,11 @@ public:
     void run(int argc, char* argv[])
     {
         amiga_.revertToFactorySettings();
-        //amiga_.configure(CONFIG_A500_ECS_1MB);
-        amiga_.configure(CONFIG_A500_OCS_1MB);
-        //amiga_.configure(OPT_AGNUS_REVISION, /*AGNUS_ECS_1MB*/AGNUS_OCS_DIP);
-        //amiga_.configure(OPT_CHIP_RAM, 512);
-        //amiga_.configure(OPT_SLOW_RAM, 512);
-        //amiga_.configure(OPT_FAST_RAM, 0);
-        amiga_.configure(OPT_BLITTER_ACCURACY, 2);
-
-        amiga_.configure(OPT_RAM_INIT_PATTERN, RAM_INIT_RANDOMIZED);
-
+        amiga_.configure(CONFIG_A500_ECS_1MB);
         amiga_.paula.muxer.setSampleRate(audio_sample_rate);
 
         bool auto_power_on = true;
-        int drive = 0;
+        int drive = 0, hd = 0;
         for (int i = 1; i < argc; ++i) {
             const auto suffix = util::uppercased(util::extractSuffix(argv[i]));
 
@@ -306,12 +297,17 @@ public:
                 amiga_.stopAndGo();
                 auto_power_on = false;
                 break;
+            } else if (suffix == "ROM") {
+                amiga_.mem.loadRom(argv[i]);
+            } else if (suffix == "HDF" && hd < 4) {
+                amiga_.configure(OPT_HDR_CONNECT, hd, 1);
+                amiga_.hd[hd]->init(HDFFile(argv[i]));
+                ++hd;
             } else if (drive < 4) {
                 std::cout << "Inserting in DF" << drive << ": " << argv[i] << "\n";
                 if (drive)
                     amiga_.configure(OPT_DRIVE_CONNECT, drive, 1);
                 amiga_.df[drive]->swapDisk(load_disk(argv[i]));
-                //amiga_.paula.diskController.insertDisk(load_disk(filename), 0, (Cycle)SEC(1.8));
                 ++drive;
             }
         }
@@ -512,7 +508,7 @@ private:
         mouse_captured_ = enabled;
     }
 
-    void msg_queue_callback(long type, long data)
+    void msg_queue_callback(long type, i64 data)
     {
         switch (type) {
             case MSG_DRIVE_SELECT:
@@ -523,6 +519,10 @@ private:
             case MSG_DRIVE_LED_ON:
             case MSG_DRIVE_LED_OFF:
             case MSG_SER_IN:
+            case MSG_HDR_READ:
+            case MSG_HDR_WRITE:
+            case MSG_HDR_IDLE:
+            case MSG_HDR_STEP:
                 return;
             case MSG_CLOSE_CONSOLE:
                 overlay_active_ = false;
