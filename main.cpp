@@ -1,4 +1,3 @@
-#include <SDL.h>
 #include <iostream>
 #include <stdexcept>
 #include <memory>
@@ -8,6 +7,8 @@
 #include <cstring>
 #include <stdint.h>
 #include <ctime>
+
+#include <SDL.h>
 
 #include "config.h"
 #include "Amiga.h"
@@ -257,8 +258,8 @@ public:
         }
 
 
-        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, i64 data) {
-            reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(type, data);
+        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, u32 data1, u32 data2) {
+            reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(type, data1, data2);
         });
     }
 
@@ -273,7 +274,10 @@ public:
     void run(int argc, char* argv[])
     {
         amiga_.revertToFactorySettings();
-        amiga_.configure(CONFIG_A500_ECS_1MB);
+        //amiga_.configure(CONFIG_A500_ECS_1MB);
+        amiga_.configure(CONFIG_A500_OCS_1MB);
+        //amiga_.configure(OPT_CHIP_RAM, 1024);
+        //amiga_.configure(OPT_FAST_RAM, 8192);
         amiga_.paula.muxer.setSampleRate(audio_sample_rate);
 
         bool auto_power_on = true;
@@ -410,9 +414,9 @@ public:
             bool update = overlay_active_ && overlay_dirty_;
             if (power_is_on_) {
                 amiga_.denise.pixelEngine.lockStableBuffer();
-                const auto buffer = amiga_.denise.pixelEngine.getStableBuffer();
-                if (buffer.data != last_buffer_pointer_) { // HACK: Don't update if not a new frame
-                    std::memcpy(&current_frame_[0], buffer.data, HPIXELS * VPIXELS * sizeof(uint32_t));
+                const auto& buffer = amiga_.denise.pixelEngine.getStableBuffer();
+                if (buffer.ptr != last_buffer_pointer_) { // HACK: Don't update if not a new frame
+                    std::memcpy(&current_frame_[0], buffer.ptr, HPIXELS * VPIXELS * sizeof(uint32_t));
                     amiga_.denise.pixelEngine.unlockStableBuffer();
 
                     void* pixels;
@@ -439,7 +443,7 @@ public:
 
                     std::swap(current_frame_, last_frame_);
                     last_frame_type_ = buffer.longFrame;
-                    last_buffer_pointer_ = buffer.data;
+                    last_buffer_pointer_ = buffer.ptr;
                     update = true;
                 } else {
                     amiga_.denise.pixelEngine.unlockStableBuffer();
@@ -498,6 +502,7 @@ private:
     bool overlay_blink_ = false;
     bool power_is_on_ = false;
     uint64_t last_overlay_blink_ = 0;
+    std::string ser_buffer_;
 
     void capture_mouse(bool enabled)
     {
@@ -508,7 +513,7 @@ private:
         mouse_captured_ = enabled;
     }
 
-    void msg_queue_callback(long type, i64 data)
+    void msg_queue_callback(long type, u32 data1, u32 data2)
     {
         switch (type) {
             case MSG_DRIVE_SELECT:
@@ -558,8 +563,18 @@ private:
 #endif
                 std::cout << "Recording exported\n";
                 break;
+            case MSG_SER_OUT:
+                if ((data1 & 0xff) != '\n') {
+                    ser_buffer_.push_back(static_cast<char>(data1 & 0xff));
+                    return;
+                }
+                while (!ser_buffer_.empty() && ser_buffer_.back() == '\r')
+                    ser_buffer_.pop_back();
+                std::cout << "Serial data: \"" << ser_buffer_.c_str() << "\"\n";
+                ser_buffer_.clear();
+                return;
         }
-        std::cerr << "MsgQueue: type=" << type << "(" << MsgTypeEnum::key(type) <<  ") data=" << data << "\n";
+        std::cerr << "MsgQueue: type=" << type << "(" << MsgTypeEnum::key(type) <<  ") data1=" << data1 << " data2=" << data2 << "\n";
     }
 
     void audio_callback(Uint8* stream, int len)

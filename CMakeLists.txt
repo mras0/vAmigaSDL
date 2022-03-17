@@ -19,6 +19,8 @@ else()
     set(CMAKE_CXX_EXTENSIONS False)
 
     set(COMMON_FLAGS "-O3 -ggdb")
+    #set(COMMON_FLAGS "-fsanitize=address -ggdb")
+    #set(COMMON_FLAGS "-fsanitize=thread -ggdb")
 
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_FLAGS}")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_FLAGS}")
@@ -32,6 +34,7 @@ if (WIN32)
 elseif (${CMAKE_HOST_SYSTEM_VERSION} MATCHES ".*-WSL2$")
     message(WARNING "Adding WSL2 mouse hack")
     add_definitions("-DWSL2_MOUSE_HACK")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
 endif()
 
 if (WIN32)
