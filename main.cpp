@@ -13,6 +13,7 @@
 #include "config.h"
 #include "Amiga.h"
 #include "RomFile.h"
+#include "ExtendedRomFile.h"
 #include "EXEFile.h"
 #include "DMSFile.h"
 #include "IOUtils.h"
@@ -258,8 +259,8 @@ public:
         }
 
 
-        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, u32 data1, u32 data2) {
-            reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(type, data1, data2);
+        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, i32 data1, i32 data2, i32 data3, i32 data4) {
+            reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(type, data1, data2, data3, data4);
         });
     }
 
@@ -274,14 +275,22 @@ public:
     void run(int argc, char* argv[])
     {
         amiga_.revertToFactorySettings();
-        //amiga_.configure(CONFIG_A500_ECS_1MB);
+        #if 1
         amiga_.configure(CONFIG_A500_OCS_1MB);
-        //amiga_.configure(OPT_CHIP_RAM, 1024);
-        //amiga_.configure(OPT_FAST_RAM, 8192);
+        amiga_.configure(OPT_CHIP_RAM, 512);
+        amiga_.configure(OPT_SLOW_RAM, 512);
+        #else
+        amiga_.configure(CONFIG_A500_ECS_1MB);
+        amiga_.configure(OPT_AGNUS_REVISION, AGNUS_ECS_2MB);
+        amiga_.configure(OPT_CHIP_RAM, 1024);
+        amiga_.configure(OPT_SLOW_RAM, 512);
+        amiga_.configure(OPT_FAST_RAM, 8192);
+        #endif
         amiga_.paula.muxer.setSampleRate(audio_sample_rate);
 
         bool auto_power_on = true;
         int drive = 0, hd = 0;
+        std::string ext_rom;
         for (int i = 1; i < argc; ++i) {
             const auto suffix = util::uppercased(util::extractSuffix(argv[i]));
 
@@ -303,8 +312,15 @@ public:
                 break;
             } else if (suffix == "ROM") {
                 amiga_.mem.loadRom(argv[i]);
+            } else if (suffix == "BIN") {
+                if (ExtendedRomFile::isExtendedRomFile(argv[i]))
+                    ext_rom = argv[i]; // load outside loop as loadRom deletes any extended rom (!)
+                else if (RomFile::isRomFile(argv[i]))
+                    amiga_.mem.loadRom(argv[i]);
+                else
+                    throw std::runtime_error { "Unknown binary file: " + std::string { argv[i] } };
             } else if (suffix == "HDF" && hd < 4) {
-                amiga_.configure(OPT_HDR_CONNECT, hd, 1);
+                amiga_.configure(OPT_HDC_CONNECT, hd, 1);
                 amiga_.hd[hd]->init(HDFFile(argv[i]));
                 ++hd;
             } else if (drive < 4) {
@@ -319,6 +335,8 @@ public:
         if (!amiga_.mem.hasRom()) {
             RomFile rom { "kick13.rom" };
             amiga_.mem.loadRom(rom);
+        } else if (!ext_rom.empty()) {
+            amiga_.mem.loadExt(ext_rom);
         }
 
         if (auto_power_on) {
@@ -513,7 +531,7 @@ private:
         mouse_captured_ = enabled;
     }
 
-    void msg_queue_callback(long type, u32 data1, u32 data2)
+    void msg_queue_callback(long type, i32 data1, i32 data2, i32 data3, i32 data4)
     {
         switch (type) {
             case MSG_DRIVE_SELECT:
@@ -523,23 +541,42 @@ private:
             case MSG_DRIVE_MOTOR_OFF:
             case MSG_DRIVE_LED_ON:
             case MSG_DRIVE_LED_OFF:
+            case MSG_DISK_INSERT:
+            case MSG_DISK_EJECT:
             case MSG_SER_IN:
             case MSG_HDR_READ:
             case MSG_HDR_WRITE:
             case MSG_HDR_IDLE:
             case MSG_HDR_STEP:
+            case MSG_HDC_STATE:
+            case MSG_HDC_CONNECT:
+            case MSG_VIEWPORT:
+            case MSG_CONFIG:
+            case MSG_POWER_LED_ON:
+            case MSG_POWER_LED_OFF:
+            case MSG_POWER_LED_DIM:
+            case MSG_DRIVE_CONNECT:
+            case MSG_DRIVE_DISCONNECT:
+            case MSG_REGISTER:
+            case MSG_DMA_DEBUG_ON:
+            case MSG_DMA_DEBUG_OFF:
+            case MSG_MEM_LAYOUT:
+            case MSG_MUTE_OFF:
+            case MSG_RUN:
+            case MSG_PAUSE:
+            case MSG_RESET:
                 return;
             case MSG_CLOSE_CONSOLE:
                 overlay_active_ = false;
                 return;
             case MSG_POWER_ON:
                 power_is_on_ = true;
-                break;
+                return;
             case MSG_POWER_OFF:
                 power_is_on_ = false;
                 std::memset(&current_frame_[0], 0, sizeof(uint32_t)*current_frame_.size());
                 std::memset(&last_frame_[0], 0, sizeof(uint32_t)*last_frame_.size());
-                break;
+                return;
             case MSG_UPDATE_CONSOLE:
                 overlay_dirty_ = true;
                 return;
@@ -574,7 +611,7 @@ private:
                 ser_buffer_.clear();
                 return;
         }
-        std::cerr << "MsgQueue: type=" << type << "(" << MsgTypeEnum::key(type) <<  ") data1=" << data1 << " data2=" << data2 << "\n";
+            std::cerr << "MsgQueue: type=" << type << "(" << MsgTypeEnum::key(type) << ") data1=" << data1 << " data2=" << data2 << " data3=" << data3 << " data4=" << data4 << "\n";
     }
 
     void audio_callback(Uint8* stream, int len)
