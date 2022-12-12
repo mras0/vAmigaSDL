@@ -277,15 +277,18 @@ public:
         amiga_.revertToFactorySettings();
         #if 1
         amiga_.configure(CONFIG_A500_OCS_1MB);
+        amiga_.configure(OPT_AGNUS_REVISION, AGNUS_OCS);
         amiga_.configure(OPT_CHIP_RAM, 512);
         amiga_.configure(OPT_SLOW_RAM, 512);
+        amiga_.configure(OPT_FAST_RAM, 0);
         #else
         amiga_.configure(CONFIG_A500_ECS_1MB);
-        amiga_.configure(OPT_AGNUS_REVISION, AGNUS_ECS_2MB);
-        amiga_.configure(OPT_CHIP_RAM, 1024);
-        amiga_.configure(OPT_SLOW_RAM, 512);
+        amiga_.configure(OPT_CHIP_RAM, 2048);
         amiga_.configure(OPT_FAST_RAM, 8192);
+        amiga_.configure(OPT_CPU_OVERCLOCKING, 8);
+        amiga_.configure(OPT_CPU_REVISION, CPU_68EC020);
         #endif
+        amiga_.configure(OPT_BLITTER_ACCURACY, 2);
         amiga_.paula.muxer.setSampleRate(audio_sample_rate);
 
         bool auto_power_on = true;
@@ -312,6 +315,7 @@ public:
                 break;
             } else if (suffix == "ROM") {
                 amiga_.mem.loadRom(argv[i]);
+                std::cout << "Using ROM: " << RomIdentifierEnum::key(amiga_.mem.romIdentifier()) << "\n";
             } else if (suffix == "BIN") {
                 if (ExtendedRomFile::isExtendedRomFile(argv[i]))
                     ext_rom = argv[i]; // load outside loop as loadRom deletes any extended rom (!)
@@ -384,6 +388,8 @@ public:
                 case SDL_KEYUP:
                     if (overlay_active_)
                         break;
+                    if (handle_joystick_key(e.key.keysym.sym, e.type == SDL_KEYUP))
+                        break;
                     if (const auto key = convert_key(e.key.keysym.sym); key != 0xFF) {
                         if (e.type == SDL_KEYUP)
                             amiga_.keyboard.releaseKey(key);
@@ -431,11 +437,9 @@ public:
 
             bool update = overlay_active_ && overlay_dirty_;
             if (power_is_on_) {
-                amiga_.denise.pixelEngine.lockStableBuffer();
                 const auto& buffer = amiga_.denise.pixelEngine.getStableBuffer();
-                if (buffer.ptr != last_buffer_pointer_) { // HACK: Don't update if not a new frame
-                    std::memcpy(&current_frame_[0], buffer.ptr, HPIXELS * VPIXELS * sizeof(uint32_t));
-                    amiga_.denise.pixelEngine.unlockStableBuffer();
+                if (buffer.pixels.ptr != last_buffer_pointer_) { // HACK: Don't update if not a new frame
+                    std::memcpy(&current_frame_[0], buffer.pixels.ptr, HPIXELS * VPIXELS * sizeof(uint32_t));
 
                     void* pixels;
                     int pitch;
@@ -446,8 +450,8 @@ public:
                     const uint32_t* src1 = &current_frame_[0];
                     const uint32_t* src2 = buffer.longFrame == last_frame_type_ ? &current_frame_[0] : &last_frame_[0];
 
-                    src1 += HPIXELS * ystart + xstart;
-                    src2 += HPIXELS * ystart + xstart;
+                    src1 += HPIXELS * ystart + HBLANK_MAX * 4;//xstart;
+                    src2 += HPIXELS * ystart + HBLANK_MAX * 4; // xstart;
                     for (uint32_t y = 0; y < screen_height / 2; ++y) {
                         std::memcpy(dest1, src1, screen_width * sizeof(uint32_t));
                         std::memcpy(dest2, src2, screen_width * sizeof(uint32_t));
@@ -461,10 +465,8 @@ public:
 
                     std::swap(current_frame_, last_frame_);
                     last_frame_type_ = buffer.longFrame;
-                    last_buffer_pointer_ = buffer.ptr;
+                    last_buffer_pointer_ = buffer.pixels.ptr;
                     update = true;
-                } else {
-                    amiga_.denise.pixelEngine.unlockStableBuffer();
                 }
             } else {
                 void* pixels;
@@ -779,6 +781,30 @@ private:
             }
             std::cout << "Unhandled key: " << k.sym << " " << SDL_GetKeyName(k.sym) << "\n";
             return;
+        }
+    }
+
+    bool handle_joystick_key(SDL_Keycode key, bool up)
+    {
+        switch (key) {
+        case SDLK_KP_0:
+        case SDLK_KP_5:
+            amiga_.controlPort2.joystick.trigger(up ? RELEASE_FIRE : PRESS_FIRE);
+            return true;
+        case SDLK_KP_8:
+            amiga_.controlPort2.joystick.trigger(up ? RELEASE_Y : PULL_UP);
+            return true;
+        case SDLK_KP_2:
+            amiga_.controlPort2.joystick.trigger(up ? RELEASE_Y : PULL_DOWN);
+            return true;
+        case SDLK_KP_4:
+            amiga_.controlPort2.joystick.trigger(up ? RELEASE_X : PULL_LEFT);
+            return true;
+        case SDLK_KP_6:
+            amiga_.controlPort2.joystick.trigger(up ? RELEASE_X : PULL_RIGHT);
+            return true;
+        default:
+            return false;
         }
     }
 };

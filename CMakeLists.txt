@@ -4,7 +4,7 @@ project(vAmiga C CXX)
 if (MSVC)
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "Supported build configurations" FORCE)
 
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest /permissive- /Zi /Zo /sdl /W4 /wd4100 /wd4201 /wd4324 /wd4458")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++latest /permissive- /Zi /Zo /sdl /W4 /wd4100 /wd4201 /wd4324 /wd4458 /wd4146")
 
     if (NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
         set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /JMC")
@@ -21,6 +21,14 @@ else()
     set(COMMON_FLAGS "-O3 -ggdb")
     #set(COMMON_FLAGS "-fsanitize=address -ggdb")
     #set(COMMON_FLAGS "-fsanitize=thread -ggdb")
+
+    if (WIN32)
+        # For MinGW
+        set(COMMON_FLAGS "-Wa,-mbig-obj")
+    else()
+        # Bogus warning at HDFFile.cpp:468
+        set(COMMON_FLAGS "-Wno-error=array-bounds")
+    endif()
 
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_FLAGS}")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_FLAGS}")
