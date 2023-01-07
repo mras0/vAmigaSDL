@@ -16,10 +16,13 @@
 #include "ExtendedRomFile.h"
 #include "EXEFile.h"
 #include "DMSFile.h"
+#include "EXTFile.h"
 #include "IOUtils.h"
 #include "Snapshot.h"
 
 #include "microknight.h"
+
+using namespace vamiga;
 
 // Visible area
 constexpr int xstart = (HBLANK_MAX + 1) * 4;
@@ -59,20 +62,21 @@ std::unique_ptr<FloppyDisk> load_disk(const std::string& filename)
 {
     if (DMSFile::isCompatible(filename)) {
         DMSFile dms{filename};
-        std::cout << filename << ": DMS\n";
         return std::make_unique<FloppyDisk>(dms);
     }
     if (ADFFile::isCompatible(filename)) {
         ADFFile adf{filename};
-        std::cout << filename << ": ADF\n";
         return std::make_unique<FloppyDisk>(adf);
     }
     if (EXEFile::isCompatible(filename)) {
         EXEFile exe{filename};
-        std::cout << filename << ": EXE\n";
         return std::make_unique<FloppyDisk>(exe);
     }
-    throw std::runtime_error{"Unknown file type: " + filename};
+    if (EXTFile::isCompatible(filename)) {
+        EXTFile ext { filename };
+        return std::make_unique<FloppyDisk>(ext);
+    }
+    throw std::runtime_error { "Unknown file type: " + filename };
 }
 
 #define MAKE_SDL_PTR(type, destroyer) \
@@ -240,7 +244,7 @@ public:
         SDL_AudioSpec want {};
         SDL_AudioSpec have;
 
-        static_assert(sizeof(SampleType) == 8);
+        static_assert(sizeof(SAMPLE_T) == 8);
         want.freq = audio_sample_rate;
         want.format = AUDIO_F32SYS;
         want.channels = 2;
@@ -266,14 +270,15 @@ public:
 
     ~driver() {
         amiga_.powerOff();
-        const auto cpu_info = amiga_.cpu.getInfo();
-        std::cout << "PC = " << util::hex(cpu_info.pc0) << "\n";
-        amiga_.halt();
+        //const auto cpu_info = amiga_.cpu.getInfo();
+        //std::cout << "PC = " << util::hex(cpu_info.pc0) << "\n";
         SDL_CloseAudioDevice(dev_);
     }
 
     void run(int argc, char* argv[])
     {
+        //amiga_.launch();
+        //need_halt_ = true;
         amiga_.revertToFactorySettings();
         #if 1
         amiga_.configure(CONFIG_A500_OCS_1MB);
@@ -342,6 +347,8 @@ public:
         } else if (!ext_rom.empty()) {
             amiga_.mem.loadExt(ext_rom);
         }
+
+        amiga_.launch();
 
         if (auto_power_on) {
             amiga_.powerOn();
@@ -437,6 +444,8 @@ public:
 
             bool update = overlay_active_ && overlay_dirty_;
             if (power_is_on_) {
+                // TODO: Implement new long frame logic
+
                 const auto& buffer = amiga_.denise.pixelEngine.getStableBuffer();
                 if (buffer.pixels.ptr != last_buffer_pointer_) { // HACK: Don't update if not a new frame
                     std::memcpy(&current_frame_[0], buffer.pixels.ptr, HPIXELS * VPIXELS * sizeof(uint32_t));
@@ -445,10 +454,10 @@ public:
                     int pitch;
                     if (SDL_LockTexture(texture_.get(), nullptr, &pixels, &pitch))
                         throw_sdl_error("SDL_LockTexture");
-                    uint8_t* dest1 = reinterpret_cast<uint8_t*>(pixels) + !buffer.longFrame * pitch;
-                    uint8_t* dest2 = reinterpret_cast<uint8_t*>(pixels) + buffer.longFrame * pitch;
+                    uint8_t* dest1 = reinterpret_cast<uint8_t*>(pixels) + !buffer.lof * pitch;
+                    uint8_t* dest2 = reinterpret_cast<uint8_t*>(pixels) + buffer.lof * pitch;
                     const uint32_t* src1 = &current_frame_[0];
-                    const uint32_t* src2 = buffer.longFrame == last_frame_type_ ? &current_frame_[0] : &last_frame_[0];
+                    const uint32_t* src2 = buffer.lof == last_frame_type_ ? &current_frame_[0] : &last_frame_[0];
 
                     src1 += HPIXELS * ystart + HBLANK_MAX * 4;//xstart;
                     src2 += HPIXELS * ystart + HBLANK_MAX * 4; // xstart;
@@ -464,7 +473,7 @@ public:
                     //SDL_RenderClear(renderer_.get());
 
                     std::swap(current_frame_, last_frame_);
-                    last_frame_type_ = buffer.longFrame;
+                    last_frame_type_ = buffer.lof;
                     last_buffer_pointer_ = buffer.pixels.ptr;
                     update = true;
                 }
@@ -508,6 +517,7 @@ private:
     SDL_Texture_ptr overlay_;
     SDL_AudioDeviceID dev_;
     Amiga amiga_;
+    bool need_halt_ = false;
     bool mouse_captured_ = false;
 #ifdef WSL2_MOUSE_HACK
     int last_mouse_x_ = 0;
@@ -564,6 +574,8 @@ private:
             case MSG_DMA_DEBUG_OFF:
             case MSG_MEM_LAYOUT:
             case MSG_MUTE_OFF:
+            case MSG_OVERCLOCKING:
+            case MSG_VIDEO_FORMAT:
             case MSG_RUN:
             case MSG_PAUSE:
             case MSG_RESET:
@@ -618,7 +630,7 @@ private:
 
     void audio_callback(Uint8* stream, int len)
     {
-        constexpr auto sample_size = sizeof(SampleType);
+        constexpr auto sample_size = sizeof(SAMPLE_T);
         assert(len % sample_size == 0);
         amiga_.paula.muxer.copy(stream, len / sample_size);
     }
