@@ -16,7 +16,7 @@
 #include "ExtendedRomFile.h"
 #include "EXEFile.h"
 #include "DMSFile.h"
-#include "EXTFile.h"
+#include "EADFFile.h"
 #include "IOUtils.h"
 #include "Snapshot.h"
 
@@ -65,15 +65,19 @@ std::unique_ptr<FloppyDisk> load_disk(const std::string& filename)
         return std::make_unique<FloppyDisk>(dms);
     }
     if (ADFFile::isCompatible(filename)) {
-        ADFFile adf{filename};
-        return std::make_unique<FloppyDisk>(adf);
+        try {
+            ADFFile adf { filename };
+            return std::make_unique<FloppyDisk>(adf);
+        } catch (...) {
+            // Maybe it's an extended ADF
+        }
     }
     if (EXEFile::isCompatible(filename)) {
         EXEFile exe{filename};
         return std::make_unique<FloppyDisk>(exe);
     }
-    if (EXTFile::isCompatible(filename)) {
-        EXTFile ext { filename };
+    if (EADFFile::isCompatible(filename)) {
+        EADFFile ext { filename };
         return std::make_unique<FloppyDisk>(ext);
     }
     throw std::runtime_error { "Unknown file type: " + filename };
@@ -214,7 +218,7 @@ char with_shift(char c)
 
 class driver {
 public:
-    static constexpr int audio_sample_rate = 44100;
+    static constexpr int audio_sample_rate = 48000;
     static constexpr int screen_width = xend - xstart;
     static constexpr int screen_height = 2 * (yend - ystart);
 
@@ -263,22 +267,18 @@ public:
         }
 
 
-        amiga_.msgQueue.setListener(this, [](const void* ptr, long type, i32 data1, i32 data2, i32 data3, i32 data4) {
-            reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(type, data1, data2, data3, data4);
+        amiga_.msgQueue.setListener(this, [](const void* ptr, Message msg) {
+            reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(msg);
         });
     }
 
     ~driver() {
         amiga_.powerOff();
-        //const auto cpu_info = amiga_.cpu.getInfo();
-        //std::cout << "PC = " << util::hex(cpu_info.pc0) << "\n";
         SDL_CloseAudioDevice(dev_);
     }
 
     void run(int argc, char* argv[])
     {
-        //amiga_.launch();
-        //need_halt_ = true;
         amiga_.revertToFactorySettings();
         #if 1
         amiga_.configure(CONFIG_A500_OCS_1MB);
@@ -290,11 +290,11 @@ public:
         amiga_.configure(CONFIG_A500_ECS_1MB);
         amiga_.configure(OPT_CHIP_RAM, 2048);
         amiga_.configure(OPT_FAST_RAM, 8192);
-        amiga_.configure(OPT_CPU_OVERCLOCKING, 8);
+        amiga_.configure(OPT_CPU_OVERCLOCKING, 16);
         amiga_.configure(OPT_CPU_REVISION, CPU_68EC020);
         #endif
         amiga_.configure(OPT_BLITTER_ACCURACY, 2);
-        amiga_.paula.muxer.setSampleRate(audio_sample_rate);
+        amiga_.host.setSampleRate(audio_sample_rate);
 
         bool auto_power_on = true;
         int drive = 0, hd = 0;
@@ -320,7 +320,6 @@ public:
                 break;
             } else if (suffix == "ROM") {
                 amiga_.mem.loadRom(argv[i]);
-                std::cout << "Using ROM: " << RomIdentifierEnum::key(amiga_.mem.romIdentifier()) << "\n";
             } else if (suffix == "BIN") {
                 if (ExtendedRomFile::isExtendedRomFile(argv[i]))
                     ext_rom = argv[i]; // load outside loop as loadRom deletes any extended rom (!)
@@ -543,18 +542,16 @@ private:
         mouse_captured_ = enabled;
     }
 
-    void msg_queue_callback(long type, i32 data1, i32 data2, i32 data3, i32 data4)
+    void msg_queue_callback(Message msg)
     {
-        switch (type) {
+        switch (msg.type) {
             case MSG_DRIVE_SELECT:
             case MSG_DRIVE_STEP:
             case MSG_DRIVE_POLL:
-            case MSG_DRIVE_MOTOR_ON:
-            case MSG_DRIVE_MOTOR_OFF:
-            case MSG_DRIVE_LED_ON:
-            case MSG_DRIVE_LED_OFF:
             case MSG_DISK_INSERT:
             case MSG_DISK_EJECT:
+            case MSG_DRIVE_LED:
+            case MSG_DRIVE_MOTOR:
             case MSG_SER_IN:
             case MSG_HDR_READ:
             case MSG_HDR_WRITE:
@@ -568,32 +565,32 @@ private:
             case MSG_POWER_LED_OFF:
             case MSG_POWER_LED_DIM:
             case MSG_DRIVE_CONNECT:
-            case MSG_DRIVE_DISCONNECT:
-            case MSG_REGISTER:
-            case MSG_DMA_DEBUG_ON:
-            case MSG_DMA_DEBUG_OFF:
             case MSG_MEM_LAYOUT:
-            case MSG_MUTE_OFF:
             case MSG_OVERCLOCKING:
             case MSG_VIDEO_FORMAT:
+            case MSG_CONSOLE_UPDATE:
+            case MSG_DMA_DEBUG:
+            case MSG_MUTE:
             case MSG_RUN:
             case MSG_PAUSE:
             case MSG_RESET:
                 return;
-            case MSG_CLOSE_CONSOLE:
-                overlay_active_ = false;
+            case MSG_POWER:
+                if (msg.value) {
+                    power_is_on_ = true;
+                } else {
+                    power_is_on_ = false;
+                    std::memset(&current_frame_[0], 0, sizeof(uint32_t)*current_frame_.size());
+                    std::memset(&last_frame_[0], 0, sizeof(uint32_t)*last_frame_.size());
+                }
                 return;
-            case MSG_POWER_ON:
-                power_is_on_ = true;
-                return;
-            case MSG_POWER_OFF:
-                power_is_on_ = false;
-                std::memset(&current_frame_[0], 0, sizeof(uint32_t)*current_frame_.size());
-                std::memset(&last_frame_[0], 0, sizeof(uint32_t)*last_frame_.size());
-                return;
-            case MSG_UPDATE_CONSOLE:
-                overlay_dirty_ = true;
-                return;
+
+//            case MSG_CLOSE_CONSOLE:
+//                overlay_active_ = false;
+//                return;
+//            case MSG_UPDATE_CONSOLE:
+//                overlay_dirty_ = true;
+//                return;
             case MSG_USER_SNAPSHOT_TAKEN:
             {
                 std::unique_ptr<Snapshot> snapshot{amiga_.latestUserSnapshot()};
@@ -614,18 +611,18 @@ private:
 #endif
                 std::cout << "Recording exported\n";
                 break;
-            case MSG_SER_OUT:
-                if ((data1 & 0xff) != '\n') {
-                    ser_buffer_.push_back(static_cast<char>(data1 & 0xff));
-                    return;
-                }
-                while (!ser_buffer_.empty() && ser_buffer_.back() == '\r')
-                    ser_buffer_.pop_back();
-                std::cout << "Serial data: \"" << ser_buffer_.c_str() << "\"\n";
-                ser_buffer_.clear();
-                return;
+//            case MSG_SER_OUT:
+//                if ((data1 & 0xff) != '\n') {
+//                    ser_buffer_.push_back(static_cast<char>(data1 & 0xff));
+//                    return;
+//                }
+//                while (!ser_buffer_.empty() && ser_buffer_.back() == '\r')
+//                    ser_buffer_.pop_back();
+//                std::cout << "Serial data: \"" << ser_buffer_.c_str() << "\"\n";
+//                ser_buffer_.clear();
+//                return;
         }
-            std::cerr << "MsgQueue: type=" << type << "(" << MsgTypeEnum::key(type) << ") data1=" << data1 << " data2=" << data2 << " data3=" << data3 << " data4=" << data4 << "\n";
+            std::cerr << "MsgQueue: type=" << msg.type << "(" << MsgTypeEnum::key(msg.type) << ") value=" << msg.value << "\n";
     }
 
     void audio_callback(Uint8* stream, int len)
