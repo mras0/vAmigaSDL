@@ -280,19 +280,7 @@ public:
     void run(int argc, char* argv[])
     {
         amiga_.revertToFactorySettings();
-        #if 1
         amiga_.configure(CONFIG_A500_OCS_1MB);
-        amiga_.configure(OPT_AGNUS_REVISION, AGNUS_OCS);
-        amiga_.configure(OPT_CHIP_RAM, 512);
-        amiga_.configure(OPT_SLOW_RAM, 512);
-        amiga_.configure(OPT_FAST_RAM, 0);
-        #else
-        amiga_.configure(CONFIG_A500_ECS_1MB);
-        amiga_.configure(OPT_CHIP_RAM, 2048);
-        amiga_.configure(OPT_FAST_RAM, 8192);
-        amiga_.configure(OPT_CPU_OVERCLOCKING, 16);
-        amiga_.configure(OPT_CPU_REVISION, CPU_68EC020);
-        #endif
         amiga_.configure(OPT_BLITTER_ACCURACY, 2);
         amiga_.host.setSampleRate(audio_sample_rate);
 
@@ -301,6 +289,15 @@ public:
         std::string ext_rom;
         for (int i = 1; i < argc; ++i) {
             const auto suffix = util::uppercased(util::extractSuffix(argv[i]));
+
+            if (!strcmp(argv[i], "-bigbox")) {
+                amiga_.configure(CONFIG_A500_ECS_1MB);
+                amiga_.configure(OPT_CHIP_RAM, 2048);
+                amiga_.configure(OPT_FAST_RAM, 8192);
+                amiga_.configure(OPT_CPU_OVERCLOCKING, 16);
+                amiga_.configure(OPT_CPU_REVISION, CPU_68EC020);
+                continue;
+            }
 
             if (suffix == "TXT") {
                 std::cout << "Executing script: " << argv[i] << "\n";
@@ -476,6 +473,7 @@ public:
                     last_buffer_pointer_ = buffer.pixels.ptr;
                     update = true;
                 }
+                amiga_.wakeUp();
             } else {
                 void* pixels;
                 int pitch;
