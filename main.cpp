@@ -9,8 +9,10 @@
 #include <ctime>
 
 #include <SDL.h>
+#undef main // SDL2...
 
 #include "config.h"
+#include "Emulator.h"
 #include "Amiga.h"
 #include "RomFile.h"
 #include "ExtendedRomFile.h"
@@ -266,8 +268,7 @@ public:
             throw std::runtime_error { "Audio format not supported" };
         }
 
-
-        amiga_.msgQueue.setListener(this, [](const void* ptr, Message msg) {
+        emulator_.launch(this, [](const void* ptr, Message msg) {
             reinterpret_cast<driver*>(const_cast<void*>(ptr))->msg_queue_callback(msg);
         });
     }
@@ -279,26 +280,30 @@ public:
 
     void run(int argc, char* argv[])
     {
-        amiga_.revertToFactorySettings();
-        amiga_.configure(CONFIG_A500_OCS_1MB);
-        amiga_.configure(OPT_BLITTER_ACCURACY, 2);
-        amiga_.host.setSampleRate(audio_sample_rate);
+        emulator_.set(CONFIG_A500_OCS_1MB);
+        emulator_.host.setOption(OPT_HOST_SAMPLE_RATE, audio_sample_rate);
+        emulator_.set(OPT_HDC_CONNECT, false, { 0, 1, 2, 3 });
 
         bool auto_power_on = true;
         int drive = 0, hd = 0;
         std::string ext_rom;
         for (int i = 1; i < argc; ++i) {
-            const auto suffix = util::uppercased(util::extractSuffix(argv[i]));
-
             if (!strcmp(argv[i], "-bigbox")) {
-                amiga_.configure(CONFIG_A500_ECS_1MB);
-                amiga_.configure(OPT_CHIP_RAM, 2048);
-                amiga_.configure(OPT_FAST_RAM, 8192);
-                amiga_.configure(OPT_CPU_OVERCLOCKING, 16);
-                amiga_.configure(OPT_CPU_REVISION, CPU_68EC020);
+                emulator_.set(CONFIG_A500_ECS_1MB);
+                emulator_.set(OPT_MEM_CHIP_RAM, 2048);
+                emulator_.set(OPT_MEM_FAST_RAM, 8192);
+                emulator_.set(OPT_MEM_SLOW_RAM, 0);
+                emulator_.set(OPT_CPU_OVERCLOCKING, 16);
+                emulator_.set(OPT_CPU_REVISION, CPU_68EC020);
+                continue;
+            } else if (!strcmp(argv[i], "-a600")) {
+                emulator_.set(CONFIG_A500_ECS_1MB);
+                emulator_.set(OPT_MEM_CHIP_RAM, 1024);
+                emulator_.set(OPT_MEM_SLOW_RAM, 0);
                 continue;
             }
 
+            const auto suffix = util::uppercased(util::extractSuffix(argv[i]));
             if (suffix == "TXT") {
                 std::cout << "Executing script: " << argv[i] << "\n";
                 std::ifstream in{argv[i]};
@@ -310,9 +315,9 @@ public:
             } else if (suffix == "SNP") {
                 std::cout << "Loading snapshot: " << argv[i] << "\n";
                 Snapshot snp{argv[i]};
-                amiga_.powerOn();
+                emulator_.powerOn();
                 amiga_.loadSnapshot(snp);
-                amiga_.stopAndGo();
+                emulator_.run();
                 auto_power_on = false;
                 break;
             } else if (suffix == "ROM") {
@@ -325,13 +330,13 @@ public:
                 else
                     throw std::runtime_error { "Unknown binary file: " + std::string { argv[i] } };
             } else if (suffix == "HDF" && hd < 4) {
-                amiga_.configure(OPT_HDC_CONNECT, hd, 1);
+                emulator_.set(OPT_HDC_CONNECT, true, { hd });
                 amiga_.hd[hd]->init(HDFFile(argv[i]));
                 ++hd;
             } else if (drive < 4) {
                 std::cout << "Inserting in DF" << drive << ": " << argv[i] << "\n";
                 if (drive)
-                    amiga_.configure(OPT_DRIVE_CONNECT, drive, 1);
+                    emulator_.set(OPT_DRIVE_CONNECT, true, { drive });
                 amiga_.df[drive]->swapDisk(load_disk(argv[i]));
                 ++drive;
             }
@@ -344,11 +349,9 @@ public:
             amiga_.mem.loadExt(ext_rom);
         }
 
-        amiga_.launch();
-
         if (auto_power_on) {
-            amiga_.powerOn();
-            amiga_.stopAndGo();
+            emulator_.powerOn();
+            emulator_.run();
         }
 
         SDL_PauseAudioDevice(dev_, false); // unpause
@@ -374,7 +377,16 @@ public:
                             }
 #endif
                         } else {
-                            amiga_.requestUserSnapshot();
+                            std::unique_ptr<Snapshot> snapshot { amiga_.takeSnapshot() };
+                            assert(snapshot);
+                            if (snapshot) {
+                                char filename[256];
+                                auto t = std::time(nullptr);
+                                tm* local = std::localtime(&t);
+                                snprintf(filename, sizeof(filename), "snapshot_%04d%02d%02d%02d%02d%02d.snp", 1900 + local->tm_year, 1 + local->tm_mon, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec);
+                                std::cout << "Saving snapshot to " << filename << "\n";
+                                snapshot->writeToFile(filename);
+                            }
                         }
                         break;
                     } else if (e.key.keysym.sym == SDLK_F12) {
@@ -473,7 +485,7 @@ public:
                     last_buffer_pointer_ = buffer.pixels.ptr;
                     update = true;
                 }
-                amiga_.wakeUp();
+                emulator_.wakeUp();
             } else {
                 void* pixels;
                 int pitch;
@@ -513,7 +525,6 @@ private:
     SDL_Texture_ptr texture_;
     SDL_Texture_ptr overlay_;
     SDL_AudioDeviceID dev_;
-    Amiga amiga_;
     bool need_halt_ = false;
     bool mouse_captured_ = false;
 #ifdef WSL2_MOUSE_HACK
@@ -530,6 +541,8 @@ private:
     bool power_is_on_ = false;
     uint64_t last_overlay_blink_ = 0;
     std::string ser_buffer_;
+    Emulator emulator_;
+    Amiga& amiga_ = emulator_.main;
 
     void capture_mouse(bool enabled)
     {
@@ -589,20 +602,6 @@ private:
 //            case MSG_UPDATE_CONSOLE:
 //                overlay_dirty_ = true;
 //                return;
-            case MSG_USER_SNAPSHOT_TAKEN:
-            {
-                std::unique_ptr<Snapshot> snapshot{amiga_.latestUserSnapshot()};
-                assert(snapshot);
-                if (snapshot) {
-                    char filename[256];
-                    auto t = std::time(nullptr);
-                    tm *local = std::localtime(&t);
-                    snprintf(filename, sizeof(filename), "snapshot_%04d%02d%02d%02d%02d%02d.snp", 1900 + local->tm_year, 1 + local->tm_mon, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec);
-                    std::cout << "Saving snapshot to " << filename << "\n";
-                    snapshot->writeToFile(filename);
-                }
-                return;
-            }
             case MSG_RECORDING_STOPPED:
 #ifdef SCREEN_RECORDER
                 amiga_.denise.screenRecorder.exportAs("test.mp4");
@@ -815,8 +814,6 @@ private:
         }
     }
 };
-
-#undef main // SDL2...
 
 int main(int argc, char* argv[])
 {
