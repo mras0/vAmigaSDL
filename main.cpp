@@ -250,7 +250,6 @@ public:
         SDL_AudioSpec want {};
         SDL_AudioSpec have;
 
-        static_assert(sizeof(SAMPLE_T) == 8);
         want.freq = audio_sample_rate;
         want.format = AUDIO_F32SYS;
         want.channels = 2;
@@ -281,7 +280,7 @@ public:
     void run(int argc, char* argv[])
     {
         emulator_.set(CONFIG_A500_OCS_1MB);
-        emulator_.host.setOption(OPT_HOST_SAMPLE_RATE, audio_sample_rate);
+        emulator_.set(OPT_HOST_SAMPLE_RATE, audio_sample_rate);
         emulator_.set(OPT_HDC_CONNECT, false, { 0, 1, 2, 3 });
 
         bool auto_power_on = true;
@@ -293,7 +292,7 @@ public:
                 emulator_.set(OPT_MEM_CHIP_RAM, 2048);
                 emulator_.set(OPT_MEM_FAST_RAM, 8192);
                 emulator_.set(OPT_MEM_SLOW_RAM, 0);
-                emulator_.set(OPT_CPU_OVERCLOCKING, 16);
+                emulator_.set(OPT_CPU_OVERCLOCKING, 14);
                 emulator_.set(OPT_CPU_REVISION, CPU_68EC020);
                 continue;
             } else if (!strcmp(argv[i], "-a600")) {
@@ -303,16 +302,19 @@ public:
                 continue;
             }
 
-            const auto suffix = util::uppercased(util::extractSuffix(argv[i]));
-            if (suffix == "TXT") {
+            std::filesystem::path p { argv[i] };
+
+            const auto suffix = util::uppercased(p.extension().string());
+            if (suffix == ".TXT") {
                 std::cout << "Executing script: " << argv[i] << "\n";
                 std::ifstream in{argv[i]};
                 if (!in || !in.is_open())
                     throw std::runtime_error{"Error opening: " + std::string{argv[i]}};
-                amiga_.retroShell.execScript(in);
+                amiga_.retroShell.asyncExecScript(in);
+                amiga_.retroShell.exec();
                 auto_power_on = false;
                 continue;
-            } else if (suffix == "SNP") {
+            } else if (suffix == ".SNP") {
                 std::cout << "Loading snapshot: " << argv[i] << "\n";
                 Snapshot snp{argv[i]};
                 emulator_.powerOn();
@@ -320,16 +322,20 @@ public:
                 emulator_.run();
                 auto_power_on = false;
                 break;
-            } else if (suffix == "ROM") {
+            } else if (suffix == ".ROM") {
                 amiga_.mem.loadRom(argv[i]);
-            } else if (suffix == "BIN") {
-                if (ExtendedRomFile::isExtendedRomFile(argv[i]))
+            } else if (suffix == ".BIN") {
+#if 0  // XXX
+                if (ExtendedRomFile::isExtendedRomFile(p))
                     ext_rom = argv[i]; // load outside loop as loadRom deletes any extended rom (!)
                 else if (RomFile::isRomFile(argv[i]))
                     amiga_.mem.loadRom(argv[i]);
                 else
                     throw std::runtime_error { "Unknown binary file: " + std::string { argv[i] } };
-            } else if (suffix == "HDF" && hd < 4) {
+#else
+                amiga_.mem.loadRom(argv[i]);
+#endif
+            } else if (suffix == ".HDF" && hd < 4) {
                 emulator_.set(OPT_HDC_CONNECT, true, { hd });
                 amiga_.hd[hd]->init(HDFFile(argv[i]));
                 ++hd;
@@ -377,7 +383,7 @@ public:
                             }
 #endif
                         } else {
-                            std::unique_ptr<Snapshot> snapshot { amiga_.takeSnapshot() };
+                            std::unique_ptr<MediaFile> snapshot { amiga_.takeSnapshot() };
                             assert(snapshot);
                             if (snapshot) {
                                 char filename[256];
@@ -407,9 +413,9 @@ public:
                         break;
                     if (const auto key = convert_key(e.key.keysym.sym); key != 0xFF) {
                         if (e.type == SDL_KEYUP)
-                            amiga_.keyboard.releaseKey(key);
+                            amiga_.keyboard.release(key);
                         else
-                            amiga_.keyboard.pressKey(key);
+                            amiga_.keyboard.press(key);
                     }
                     break;
                 case SDL_MOUSEBUTTONDOWN:
@@ -487,6 +493,7 @@ public:
                 }
                 emulator_.wakeUp();
             } else {
+#if 0 // XXX
                 void* pixels;
                 int pitch;
                 if (SDL_LockTexture(texture_.get(), nullptr, &pixels, &pitch))
@@ -500,6 +507,7 @@ public:
                     dest += pitch;
                 }
                 SDL_UnlockTexture(texture_.get());
+#endif
                 update = true;
                 last_buffer_pointer_ = nullptr;
             }
@@ -556,6 +564,8 @@ private:
     void msg_queue_callback(Message msg)
     {
         switch (msg.type) {
+            case MSG_RSH_UPDATE:
+            case MSG_RSH_DEBUGGER:
             case MSG_DRIVE_SELECT:
             case MSG_DRIVE_STEP:
             case MSG_DRIVE_POLL:
@@ -579,7 +589,6 @@ private:
             case MSG_MEM_LAYOUT:
             case MSG_OVERCLOCKING:
             case MSG_VIDEO_FORMAT:
-            case MSG_CONSOLE_UPDATE:
             case MSG_DMA_DEBUG:
             case MSG_MUTE:
             case MSG_RUN:
@@ -624,9 +633,7 @@ private:
 
     void audio_callback(Uint8* stream, int len)
     {
-        constexpr auto sample_size = sizeof(SAMPLE_T);
-        assert(len % sample_size == 0);
-        amiga_.paula.muxer.copy(stream, len / sample_size);
+        amiga_.audioPort.copyInterleaved(reinterpret_cast<float*>(stream), len / (2 * sizeof(float)));
     }
 
     static constexpr int char_scale = 1;
@@ -735,6 +742,7 @@ private:
 
     void handle_overlay_key(const SDL_Keysym& k)
     {
+        // TODO: Shift+Enter
         assert(overlay_active_);
         auto& rs = amiga_.retroShell;
         switch (k.sym) {
