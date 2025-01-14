@@ -493,21 +493,28 @@ public:
                 }
                 emulator_.wakeUp();
             } else {
-#if 0 // XXX
                 void* pixels;
                 int pitch;
                 if (SDL_LockTexture(texture_.get(), nullptr, &pixels, &pitch))
                     throw_sdl_error("SDL_LockTexture");
+
+                static uint32_t rand_state = 1;
                 uint8_t* dest = reinterpret_cast<uint8_t*>(pixels);
-                const uint32_t* noise = amiga_.denise.pixelEngine.getNoise();
                 for (uint32_t y = 0; y < screen_height / 2; ++y) {
-                    std::memcpy(dest, noise + y * HPIXELS, screen_width * sizeof(uint32_t));
-                    dest += pitch;
-                    std::memcpy(dest, noise + y * HPIXELS, screen_width * sizeof(uint32_t));
-                    dest += pitch;
+                    for (uint32_t x = 0; x < screen_width; ++x) {
+                        rand_state ^= rand_state << 13;
+                        rand_state ^= rand_state >> 17;
+                        rand_state ^= rand_state << 5;
+                        const uint32_t r = (uint8_t)rand_state;
+                        const uint32_t c = r << 16 | r << 8 | r;
+                        *(uint32_t*)(dest + x * sizeof(uint32_t)) = c;
+                        *(uint32_t*)(dest + x * sizeof(uint32_t) + pitch) = c;
+                    }
+
+                    dest += pitch * 2;
                 }
                 SDL_UnlockTexture(texture_.get());
-#endif
+
                 update = true;
                 last_buffer_pointer_ = nullptr;
             }
