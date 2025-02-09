@@ -315,8 +315,10 @@ public:
                 emulator_.set(Option::HDC_CONNECT, true, hd);
                 HardDriveAPI *dh[] = { &emulator_.hd0, &emulator_.hd1, &emulator_.hd2, &emulator_.hd3 };
                 dh[hd]->attach(p);
+#ifndef NDEBUG
                 WT_DEBUG = 1;
-                Emulator::defaults.set("HD" + std::to_string(hd) + "_PATH", p);
+#endif
+                emulator_.defaults.set("HD" + std::to_string(hd) + "_PATH", p.string());
                 emulator_.set(Option::HDR_WRITE_THROUGH, true, hd);
                 ++hd;
             } else if (drive < 4) {
@@ -325,9 +327,8 @@ public:
                     emulator_.set(Option::DRIVE_CONNECT, true, { drive });
                 FloppyDriveAPI *df[] = { &emulator_.df0, &emulator_.df1, &emulator_.df2, &emulator_.df3 };
                 const bool wp = false; // TODO write-protect true as default
-                MediaFile *floppy = MediaFile::make(p);
-                df[drive]->insertMedia(*floppy, wp); // TODO df1 ...
-                delete floppy;
+                auto floppy = std::unique_ptr<MediaFile>(MediaFile::make(p));
+                df[drive]->insertMedia(*floppy, wp);
                 ++drive;
             }
         }
