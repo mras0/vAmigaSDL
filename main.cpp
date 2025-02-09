@@ -21,6 +21,7 @@
 #include "EADFFile.h"
 #include "IOUtils.h"
 #include "Snapshot.h"
+#include "VAmiga.h"
 
 #include "microknight.h"
 
@@ -59,31 +60,6 @@ public:
 private:
     const uint32_t flags_;
 };
-
-std::unique_ptr<FloppyDisk> load_disk(const std::string& filename)
-{
-    if (DMSFile::isCompatible(filename)) {
-        DMSFile dms{filename};
-        return std::make_unique<FloppyDisk>(dms);
-    }
-    if (ADFFile::isCompatible(filename)) {
-        try {
-            ADFFile adf { filename };
-            return std::make_unique<FloppyDisk>(adf);
-        } catch (...) {
-            // Maybe it's an extended ADF
-        }
-    }
-    if (EXEFile::isCompatible(filename)) {
-        EXEFile exe{filename};
-        return std::make_unique<FloppyDisk>(exe);
-    }
-    if (EADFFile::isCompatible(filename)) {
-        EADFFile ext { filename };
-        return std::make_unique<FloppyDisk>(ext);
-    }
-    throw std::runtime_error { "Unknown file type: " + filename };
-}
 
 #define MAKE_SDL_PTR(type, destroyer) \
 struct type##_destroyer { \
@@ -273,32 +249,33 @@ public:
     }
 
     ~driver() {
-        amiga_.powerOff();
+        emulator_.powerOff();
         SDL_CloseAudioDevice(dev_);
     }
 
-    void run(int argc, char* argv[])
+    int run(int argc, char* argv[])
     {
-        emulator_.set(CONFIG_A500_OCS_1MB);
-        emulator_.set(OPT_HOST_SAMPLE_RATE, audio_sample_rate);
-        emulator_.set(OPT_HDC_CONNECT, false, { 0, 1, 2, 3 });
+        emulator_.set(ConfigScheme::A500_OCS_1MB);
+        emulator_.set(Option::HOST_SAMPLE_RATE, audio_sample_rate);
+        for (int n = 0; n < 4; ++n)
+            emulator_.set(Option::HDC_CONNECT, false, n);
 
         bool auto_power_on = true;
         int drive = 0, hd = 0;
         std::string ext_rom;
         for (int i = 1; i < argc; ++i) {
             if (!strcmp(argv[i], "-bigbox")) {
-                emulator_.set(CONFIG_A500_ECS_1MB);
-                emulator_.set(OPT_MEM_CHIP_RAM, 2048);
-                emulator_.set(OPT_MEM_FAST_RAM, 8192);
-                emulator_.set(OPT_MEM_SLOW_RAM, 0);
-                emulator_.set(OPT_CPU_OVERCLOCKING, 14);
-                emulator_.set(OPT_CPU_REVISION, CPU_68EC020);
+                emulator_.set(ConfigScheme::A500_ECS_1MB);
+                emulator_.set(Option::MEM_CHIP_RAM, 2048);
+                emulator_.set(Option::MEM_FAST_RAM, 8192);
+                emulator_.set(Option::MEM_SLOW_RAM, 0);
+                emulator_.set(Option::CPU_OVERCLOCKING, 14);
+                emulator_.set(Option::CPU_REVISION, (i64)CPURevision::CPU_68EC020);
                 continue;
             } else if (!strcmp(argv[i], "-a600")) {
-                emulator_.set(CONFIG_A500_ECS_1MB);
-                emulator_.set(OPT_MEM_CHIP_RAM, 1024);
-                emulator_.set(OPT_MEM_SLOW_RAM, 0);
+                emulator_.set(ConfigScheme::A500_ECS_1MB);
+                emulator_.set(Option::MEM_CHIP_RAM, 1024);
+                emulator_.set(Option::MEM_SLOW_RAM, 0);
                 continue;
             }
 
@@ -310,8 +287,7 @@ public:
                 std::ifstream in{argv[i]};
                 if (!in || !in.is_open())
                     throw std::runtime_error{"Error opening: " + std::string{argv[i]}};
-                amiga_.retroShell.asyncExecScript(in);
-                amiga_.retroShell.exec();
+                emulator_.retroShell.execScript(in);
                 auto_power_on = false;
                 continue;
             } else if (suffix == ".SNP") {
@@ -323,36 +299,45 @@ public:
                 auto_power_on = false;
                 break;
             } else if (suffix == ".ROM") {
-                amiga_.mem.loadRom(argv[i]);
+                emulator_.mem.loadRom(argv[i]);
             } else if (suffix == ".BIN") {
 #if 0  // XXX
                 if (ExtendedRomFile::isExtendedRomFile(p))
                     ext_rom = argv[i]; // load outside loop as loadRom deletes any extended rom (!)
-                else if (RomFile::isRomFile(argv[i]))
-                    amiga_.mem.loadRom(argv[i]);
+                else if (RomFile::isRomFile(p))
+                    amiga_.mem.loadRom(p);
                 else
                     throw std::runtime_error { "Unknown binary file: " + std::string { argv[i] } };
 #else
-                amiga_.mem.loadRom(argv[i]);
+                emulator_.mem.loadRom(p);
 #endif
             } else if (suffix == ".HDF" && hd < 4) {
-                emulator_.set(OPT_HDC_CONNECT, true, { hd });
-                amiga_.hd[hd]->init(HDFFile(argv[i]));
+                emulator_.set(Option::HDC_CONNECT, true, hd);
+                HardDriveAPI *dh[] = { &emulator_.hd0, &emulator_.hd1, &emulator_.hd2, &emulator_.hd3 };
+                dh[hd]->attach(p);
+#ifndef NDEBUG
+                WT_DEBUG = 1;
+#endif
+                emulator_.defaults.set("HD" + std::to_string(hd) + "_PATH", p.string());
+                emulator_.set(Option::HDR_WRITE_THROUGH, true, hd);
                 ++hd;
             } else if (drive < 4) {
                 std::cout << "Inserting in DF" << drive << ": " << argv[i] << "\n";
                 if (drive)
-                    emulator_.set(OPT_DRIVE_CONNECT, true, { drive });
-                amiga_.df[drive]->swapDisk(load_disk(argv[i]));
+                    emulator_.set(Option::DRIVE_CONNECT, true, { drive });
+                FloppyDriveAPI *df[] = { &emulator_.df0, &emulator_.df1, &emulator_.df2, &emulator_.df3 };
+                const bool wp = false; // TODO write-protect true as default
+                auto floppy = std::unique_ptr<MediaFile>(MediaFile::make(p));
+                df[drive]->insertMedia(*floppy, wp);
                 ++drive;
             }
         }
 
-        if (!amiga_.mem.hasRom()) {
+        if (!emulator_.mem.getInfo().hasRom) {
             RomFile rom { "kick13.rom" };
-            amiga_.mem.loadRom(rom);
+            emulator_.mem.loadRom(rom);
         } else if (!ext_rom.empty()) {
-            amiga_.mem.loadExt(ext_rom);
+            emulator_.mem.loadExt(ext_rom);
         }
 
         if (auto_power_on) {
@@ -367,7 +352,7 @@ public:
             while (SDL_PollEvent(&e)) {
                 switch (e.type) {
                 case SDL_QUIT:
-                    return;
+                    return 0;
                 case SDL_KEYDOWN:
                     if (overlay_active_) {
                         handle_overlay_key(e.key.keysym);
@@ -401,7 +386,7 @@ public:
                         capture_mouse(false);
                         break;
                     } else if (e.key.keysym.sym == SDLK_F4 && (e.key.keysym.mod & KMOD_ALT)) {
-                        return;
+                        return 0;
                     } else if (e.type == SDL_KEYUP) {
                         std::cout << "Unhandled key: " << e.key.keysym.sym << " " << SDL_GetKeyName(e.key.keysym.sym) << "\n";
                     }
@@ -409,13 +394,15 @@ public:
                 case SDL_KEYUP:
                     if (overlay_active_)
                         break;
+                    if (e.key.repeat && 0) /* TODO problem in warp mode */
+                        break;
                     if (handle_joystick_key(e.key.keysym.sym, e.type == SDL_KEYUP))
                         break;
                     if (const auto key = convert_key(e.key.keysym.sym); key != 0xFF) {
                         if (e.type == SDL_KEYUP)
-                            amiga_.keyboard.release(key);
+                            emulator_.keyboard.release(key);
                         else
-                            amiga_.keyboard.press(key);
+                            emulator_.keyboard.press(key);
                     }
                     break;
                 case SDL_MOUSEBUTTONDOWN:
@@ -427,11 +414,13 @@ public:
                             else
                                 capture_mouse(true);
                         } else {
-                            const bool pressed = e.type == SDL_MOUSEBUTTONDOWN;
-                            if (e.button.button == SDL_BUTTON_LEFT)
-                                amiga_.controlPort1.mouse.setLeftButton(pressed);
-                            else
-                                amiga_.controlPort1.mouse.setRightButton(pressed);
+			  const bool pressed = e.type == SDL_MOUSEBUTTONDOWN; // TODO middle ?
+			  bool left = (e.button.button == SDL_BUTTON_LEFT);
+			  auto& mouse = emulator_.controlPort1.mouse;
+			  if (pressed)
+			    mouse.trigger(left ? GamePadAction::PRESS_LEFT : GamePadAction::PRESS_RIGHT);
+			  else
+			    mouse.trigger(left ? GamePadAction::RELEASE_LEFT : GamePadAction::RELEASE_RIGHT);
                         }
                     }
                     break;
@@ -443,7 +432,7 @@ public:
                         last_mouse_x_ = e.motion.xrel;
                         last_mouse_y_ = e.motion.yrel;
 #else
-                        amiga_.controlPort1.mouse.setDxDy(e.motion.xrel, e.motion.yrel);
+                        emulator_.controlPort1.mouse.setDxDy(e.motion.xrel, e.motion.yrel);
                         // Make sure mouse doesn't end up on the window border
                         SDL_WarpMouseInWindow(window_.get(), screen_width / 2, screen_height / 2);
 #endif
@@ -460,18 +449,22 @@ public:
             if (power_is_on_) {
                 // TODO: Implement new long frame logic
 
-                const auto& buffer = amiga_.denise.pixelEngine.getStableBuffer();
-                if (buffer.pixels.ptr != last_buffer_pointer_) { // HACK: Don't update if not a new frame
-                    std::memcpy(&current_frame_[0], buffer.pixels.ptr, HPIXELS * VPIXELS * sizeof(uint32_t));
+                VideoPortAPI& vp = emulator_.videoPort;
+                vp.lockTexture();
+                isize nr;
+                bool lof, prevlof;
+                const u32 *ptr = vp.getTexture(&nr, &lof, &prevlof);
+                if (ptr != last_buffer_pointer_) { // HACK: Don't update if not a new frame
+                    std::memcpy(&current_frame_[0], ptr, HPIXELS * VPIXELS * sizeof(uint32_t));
 
                     void* pixels;
                     int pitch;
                     if (SDL_LockTexture(texture_.get(), nullptr, &pixels, &pitch))
                         throw_sdl_error("SDL_LockTexture");
-                    uint8_t* dest1 = reinterpret_cast<uint8_t*>(pixels) + !buffer.lof * pitch;
-                    uint8_t* dest2 = reinterpret_cast<uint8_t*>(pixels) + buffer.lof * pitch;
+                    uint8_t* dest1 = reinterpret_cast<uint8_t*>(pixels) + !lof * pitch;
+                    uint8_t* dest2 = reinterpret_cast<uint8_t*>(pixels) + lof * pitch;
                     const uint32_t* src1 = &current_frame_[0];
-                    const uint32_t* src2 = buffer.lof == last_frame_type_ ? &current_frame_[0] : &last_frame_[0];
+                    const uint32_t* src2 = (lof == last_frame_type_) ? &current_frame_[0] : &last_frame_[0];
 
                     src1 += HPIXELS * ystart + HBLANK_MAX * 4;//xstart;
                     src2 += HPIXELS * ystart + HBLANK_MAX * 4; // xstart;
@@ -487,10 +480,11 @@ public:
                     //SDL_RenderClear(renderer_.get());
 
                     std::swap(current_frame_, last_frame_);
-                    last_frame_type_ = buffer.lof;
-                    last_buffer_pointer_ = buffer.pixels.ptr;
+                    last_frame_type_ = lof;
+                    last_buffer_pointer_ = ptr;
                     update = true;
                 }
+                vp.unlockTexture();
                 emulator_.wakeUp();
             } else {
                 void* pixels;
@@ -519,6 +513,9 @@ public:
                 last_buffer_pointer_ = nullptr;
             }
 
+            if (abort_)
+                return abort_ & 0xFF;
+
             if (overlay_active_)
                 update_overlay();
 
@@ -546,7 +543,7 @@ private:
     int last_mouse_x_ = 0;
     int last_mouse_y_ = 0;
 #endif
-    uint32_t* last_buffer_pointer_ = nullptr;
+    const u32* last_buffer_pointer_ = nullptr;
     bool last_frame_type_ = false;
     std::vector<uint32_t> current_frame_;
     std::vector<uint32_t> last_frame_;
@@ -554,10 +551,11 @@ private:
     bool overlay_dirty_ = true;
     bool overlay_blink_ = false;
     bool power_is_on_ = false;
+    int abort_ = 0;
     uint64_t last_overlay_blink_ = 0;
     std::string ser_buffer_;
-    Emulator emulator_;
-    Amiga& amiga_ = emulator_.main;
+    VAmiga emulator_;
+    AmigaAPI& amiga_ = emulator_.amiga;
 
     void capture_mouse(bool enabled)
     {
@@ -571,38 +569,42 @@ private:
     void msg_queue_callback(Message msg)
     {
         switch (msg.type) {
-            case MSG_RSH_UPDATE:
-            case MSG_RSH_DEBUGGER:
-            case MSG_DRIVE_SELECT:
-            case MSG_DRIVE_STEP:
-            case MSG_DRIVE_POLL:
-            case MSG_DISK_INSERT:
-            case MSG_DISK_EJECT:
-            case MSG_DRIVE_LED:
-            case MSG_DRIVE_MOTOR:
-            case MSG_SER_IN:
-            case MSG_HDR_READ:
-            case MSG_HDR_WRITE:
-            case MSG_HDR_IDLE:
-            case MSG_HDR_STEP:
-            case MSG_HDC_STATE:
-            case MSG_HDC_CONNECT:
-            case MSG_VIEWPORT:
-            case MSG_CONFIG:
-            case MSG_POWER_LED_ON:
-            case MSG_POWER_LED_OFF:
-            case MSG_POWER_LED_DIM:
-            case MSG_DRIVE_CONNECT:
-            case MSG_MEM_LAYOUT:
-            case MSG_OVERCLOCKING:
-            case MSG_VIDEO_FORMAT:
-            case MSG_DMA_DEBUG:
-            case MSG_MUTE:
-            case MSG_RUN:
-            case MSG_PAUSE:
-            case MSG_RESET:
+            case MsgType::RSH_UPDATE:
+            case MsgType::RSH_DEBUGGER:
+            case MsgType::DRIVE_SELECT:
+            case MsgType::DRIVE_STEP:
+            case MsgType::DRIVE_POLL:
+            case MsgType::DISK_INSERT:
+            case MsgType::DISK_EJECT:
+            case MsgType::DRIVE_LED:
+            case MsgType::DRIVE_MOTOR:
+            case MsgType::SER_IN:
+            case MsgType::HDR_READ:
+            case MsgType::HDR_WRITE:
+            case MsgType::HDR_IDLE:
+            case MsgType::HDR_STEP:
+            case MsgType::HDC_STATE:
+            case MsgType::HDC_CONNECT:
+            case MsgType::VIEWPORT:
+            case MsgType::CONFIG:
+            case MsgType::POWER_LED_ON:
+            case MsgType::POWER_LED_OFF:
+            case MsgType::POWER_LED_DIM:
+            case MsgType::DRIVE_CONNECT:
+            case MsgType::MEM_LAYOUT:
+            case MsgType::OVERCLOCKING:
+            case MsgType::VIDEO_FORMAT:
+            case MsgType::DMA_DEBUG:
+            case MsgType::MUTE:
+            case MsgType::RUN:
+            case MsgType::PAUSE:
+            case MsgType::RESET:
                 return;
-            case MSG_POWER:
+            case MsgType::ABORT:
+                abort_ = msg.value | 0x100;
+                power_is_on_ = false;
+                break;
+            case MsgType::POWER:
                 if (msg.value) {
                     power_is_on_ = true;
                 } else {
@@ -612,19 +614,19 @@ private:
                 }
                 return;
 
-//            case MSG_CLOSE_CONSOLE:
+//            case MsgType::CLOSE_CONSOLE:
 //                overlay_active_ = false;
 //                return;
-//            case MSG_UPDATE_CONSOLE:
+//            case MsgType::UPDATE_CONSOLE:
 //                overlay_dirty_ = true;
 //                return;
-            case MSG_RECORDING_STOPPED:
+            case MsgType::RECORDING_STOPPED:
 #ifdef SCREEN_RECORDER
                 amiga_.denise.screenRecorder.exportAs("test.mp4");
 #endif
                 std::cout << "Recording exported\n";
                 break;
-//            case MSG_SER_OUT:
+//            case MsgType::SER_OUT:
 //                if ((data1 & 0xff) != '\n') {
 //                    ser_buffer_.push_back(static_cast<char>(data1 & 0xff));
 //                    return;
@@ -634,13 +636,17 @@ private:
 //                std::cout << "Serial data: \"" << ser_buffer_.c_str() << "\"\n";
 //                ser_buffer_.clear();
 //                return;
+            default:
+               break;
         }
-            std::cerr << "MsgQueue: type=" << msg.type << "(" << MsgTypeEnum::key(msg.type) << ") value=" << msg.value << "\n";
+	std::cerr << "MsgQueue: type=" << (long)msg.type
+		  << "(" << MsgTypeEnum::key(msg.type)
+		  << ") value=" << msg.value << "\n";
     }
 
     void audio_callback(Uint8* stream, int len)
     {
-        amiga_.audioPort.copyInterleaved(reinterpret_cast<float*>(stream), len / (2 * sizeof(float)));
+        emulator_.audioPort.copyInterleaved(reinterpret_cast<float*>(stream), len / (2 * sizeof(float)));
     }
 
     static constexpr int char_scale = 1;
@@ -701,7 +707,7 @@ private:
 
         // Hmm...
         std::vector<std::string> lines;
-        std::istringstream iss { amiga_.retroShell.text() };
+        std::istringstream iss { emulator_.retroShell.text() };
         for (std::string line; std::getline(iss, line);)
             lines.push_back(line);
 
@@ -726,7 +732,7 @@ private:
         }
 
         if (!overlay_blink_ && !lines.empty()) {
-            const auto cpos = static_cast<int>(amiga_.retroShell.cursorRel() + lines.back().length());
+            const auto cpos = static_cast<int>(emulator_.retroShell.cursorRel() + lines.back().length());
             if ((cpos + 1) * char_width < screen_width)
                 draw_cursor(pixels, pitch, cpos * char_width, y - char_height, 0xffffffff);
         }
@@ -742,7 +748,7 @@ private:
             // Paste
             std::unique_ptr<char, sdl_freer> text{SDL_GetClipboardText()};
             if (text) {
-                amiga_.retroShell.press(text.get());
+                emulator_.retroShell.press(text.get());
             }
         }
     }
@@ -751,7 +757,7 @@ private:
     {
         // TODO: Shift+Enter
         assert(overlay_active_);
-        auto& rs = amiga_.retroShell;
+        auto& rs = emulator_.retroShell;
         switch (k.sym) {
         case SDLK_ESCAPE:
         case SDLK_F12:
@@ -759,34 +765,34 @@ private:
             last_buffer_pointer_ = nullptr; // Force update (dirty)
             break;
         case SDLK_UP:
-            rs.press(RSKEY_UP);
+            rs.press(RetroShellKey::UP);
             break;
         case SDLK_DOWN:
-            rs.press(RSKEY_DOWN);
+            rs.press(RetroShellKey::DOWN);
             break;
         case SDLK_LEFT:
-            rs.press(RSKEY_LEFT);
+            rs.press(RetroShellKey::LEFT);
             break;
         case SDLK_RIGHT:
-            rs.press(RSKEY_RIGHT);
+            rs.press(RetroShellKey::RIGHT);
             break;
         case SDLK_HOME:
-            rs.press(RSKEY_HOME);
+            rs.press(RetroShellKey::HOME);
             break;
         case SDLK_END:
-            rs.press(RSKEY_END);
+            rs.press(RetroShellKey::END);
             break;
         case SDLK_TAB:
-            rs.press(RSKEY_TAB);
+            rs.press(RetroShellKey::TAB);
             break;
         case SDLK_BACKSPACE:
-            rs.press(RSKEY_BACKSPACE);
+            rs.press(RetroShellKey::BACKSPACE);
             break;
         case SDLK_DELETE:
-            rs.press(RSKEY_DEL);
+            rs.press(RetroShellKey::DEL);
             break;
         case SDLK_RETURN:
-            rs.press(RSKEY_RETURN);
+            rs.press(RetroShellKey::RETURN);
             break;
         default:
             if (k.sym >= SDLK_a && k.sym <= SDLK_z) {
@@ -807,22 +813,23 @@ private:
 
     bool handle_joystick_key(SDL_Keycode key, bool up)
     {
+        auto& joystick = emulator_.controlPort2.joystick;
         switch (key) {
         case SDLK_KP_0:
         case SDLK_KP_5:
-            amiga_.controlPort2.joystick.trigger(up ? RELEASE_FIRE : PRESS_FIRE);
+            joystick.trigger(up ? GamePadAction::RELEASE_FIRE : GamePadAction::PRESS_FIRE);
             return true;
         case SDLK_KP_8:
-            amiga_.controlPort2.joystick.trigger(up ? RELEASE_Y : PULL_UP);
+            joystick.trigger(up ? GamePadAction::RELEASE_Y : GamePadAction::PULL_UP);
             return true;
         case SDLK_KP_2:
-            amiga_.controlPort2.joystick.trigger(up ? RELEASE_Y : PULL_DOWN);
+            joystick.trigger(up ? GamePadAction::RELEASE_Y : GamePadAction::PULL_DOWN);
             return true;
         case SDLK_KP_4:
-            amiga_.controlPort2.joystick.trigger(up ? RELEASE_X : PULL_LEFT);
+            joystick.trigger(up ? GamePadAction::RELEASE_X : GamePadAction::PULL_LEFT);
             return true;
         case SDLK_KP_6:
-            amiga_.controlPort2.joystick.trigger(up ? RELEASE_X : PULL_RIGHT);
+            joystick.trigger(up ? GamePadAction::RELEASE_X : GamePadAction::PULL_RIGHT);
             return true;
         default:
             return false;
@@ -834,8 +841,8 @@ int main(int argc, char* argv[])
 {
     std::ios::sync_with_stdio(true);
     try {
-        auto d = std::make_unique<driver>();
-        d->run(argc, argv);
+        driver d;
+        return d.run(argc, argv);
 
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
